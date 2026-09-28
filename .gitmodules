@@ -1,0 +1,3 @@
+[submodule "siglent"]
+	path = siglent
+	url = git@github.com:paige-swl/siglent.git

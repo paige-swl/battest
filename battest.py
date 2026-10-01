@@ -1,4 +1,5 @@
 from ctypes import ArgumentError
+from turtle import back
 from typing import Any
 
 from siglent.siglent.multimeters import SDM3000X, SDMMeasurement, SDMVoltageRange
@@ -25,36 +26,27 @@ import os
 import logging
 import time
 
+WINDOW_LOCATION = (200, 200)
+
 class TestType(StrEnum):
     TEST_FULL = "Full"
     TEST_QUICK = "Quick"
 
 @dataclass
 class Config:
-    psuIP: str
-    psuCh: int
-    dclIP: str
-    dmmIP: str
-    chargeC: float      # Charge current in amps
-    chargeV: float      # Charging voltage cutoff in volts
-    dischargeC: float   # Discharge current in amps
-    dischargeV: float   # Discharge cutoff voltage in volts
-    dischargeT: int     # Discharge time in seconds
+    psuIP: str = "192.168.1.35"
+    psuCh: int = 1
+    dclIP: str = "192.168.1.34"
+    dmmIP: str = "192.168.1.32"
+    chargeC: float = 1.0        # Charge current in amps
+    chargeV: float = 3.6        # Voltage below which the battery will be charged before the test
+    dischargeC: float = 1.0     # Discharge current in amps
+    dischargeV: float = 3.8     # Discharge cutoff voltage in volts
+    dischargeT: int = 120       # Charge/discharge timeout in seconds
+    dcrR: float = 0.2           # Max DC resistance of battery for pass/fail
+    testLeadR: float = 0.02     # Test lead resistance between multimeter connection and battery
 
-# Starting config
-defaultConfig: Config = Config(
-    psuIP="192.168.1.35",
-    psuCh=1,
-    dclIP="192.168.1.34",
-    dmmIP="192.168.1.32",
-    chargeC=1.0,
-    chargeV=3.6,
-    dischargeC=1.0,
-    dischargeV=3.8,
-    dischargeT=60
-)
-
-layout = [
+mainLayout = [
     # Header
     [
         sg.Text("SWL Node Battery Tester")
@@ -81,14 +73,18 @@ layout = [
             [sg.Text("Charge Voltage Threshold (V)")],
             [sg.Text("Discharge Current (A)")],
             [sg.Text("Discharge Voltage Threshold (V)")],
-            [sg.Text("Discharge Time (s)")]
+            [sg.Text("Charge/Discharge Timeout (s)")],
+            [sg.Text("Battery Max DCR Threshold (Ω)")],
+            [sg.Text("Test Lead Resistance (Ω)")]
         ]),
         sg.Column([
             [sg.Spin(np.arange(0.1,2.0,0.05).tolist(), 1.0, size = (5,1), key="CHG_A")],
             [sg.Spin(np.arange(3.0,3.7,0.1).tolist(), 3.6, size = (5,1), key="CHG_V")],
             [sg.Spin(np.arange(0.1,2.0,0.05).tolist(), 1.0, size = (5,1), key="DSG_A")],
             [sg.Spin(np.arange(3.7,4.2,0.1).tolist(), 3.8, size = (5,1), key="DSG_V")],
-            [sg.Spin(np.arange(10,3600,1).tolist(), 60, size = (5,1), key="DSG_T")]
+            [sg.Spin(np.arange(10,3600,1).tolist(), 60, size = (5,1), key="DSG_T")],
+            [sg.Spin(np.arange(0.0,1.0,0.05).tolist(), 0.20, size = (5,1), key="DCR_R")],
+            [sg.Spin(np.arange(0.0,1.0,0.001).tolist(), 0.020, size = (5,1), key="TEST_R")]
         ])
     ],
     # Canvas for plots
@@ -104,7 +100,7 @@ layout = [
     ]
 ]
 
-window = sg.Window(title="SWL Node Battery Tester", layout=layout, finalize=True)
+mainWindow = sg.Window(title="SWL Node Battery Tester", layout=mainLayout, finalize=True, location=WINDOW_LOCATION)
 
 configPath = os.path.join(os.path.dirname(os.path.realpath(__file__)), "config.ini")
 
@@ -396,8 +392,8 @@ def testDCR(config: Config) -> float | None:
     i_highCurrent = mean(loc_dcl_c)
 
     # Calculate DCR
-    DCR = (v_lowCurrent - v_highCurrent) / (i_highCurrent - i_lowCurrent)
-    logger.info(f"Calculated DCR: ({v_lowCurrent:.3f} - {v_highCurrent:.3f} V) / ({i_highCurrent:.3f} - {i_lowCurrent:.3f} A) = {DCR:.3f} Ω")
+    DCR = (v_lowCurrent - v_highCurrent) / (i_highCurrent - i_lowCurrent) - config.testLeadR
+    logger.info(f"Calculated DCR: ({v_lowCurrent:.3f} - {v_highCurrent:.3f} V) / ({i_highCurrent:.3f} - {i_lowCurrent:.3f} A) - {config.testLeadR} = {DCR:.3f} Ω")
     return DCR
 
 
@@ -458,7 +454,7 @@ def startTest(config: Config, window: sg.Window):
     if v < low_target:
         logger.info(f"Battery below threshold of {low_target:.3f} V, charging")
         window.write_event_value("-TEST-STATUS-", "Charging battery")
-        if not charge(config, low_target):
+        if not charge(config, low_target, timeout_s=config.dischargeT):
             logger.error(f"Charging failed!")
             window.write_event_value("-TEST-STATUS-", "Charging failed!")
             endTest(window)
@@ -468,7 +464,7 @@ def startTest(config: Config, window: sg.Window):
     if v >= high_target:
         logger.info(f"Battery above threshold of {high_target:.3f} V, discharging")
         window.write_event_value("-TEST-STATUS-", "Discharging battery")
-        if not discharge(config, high_target):
+        if not discharge(config, high_target, timeout_s=config.dischargeT):
             logger.error(f"Discharging failed!")
             window.write_event_value("-TEST-STATUS-", "Discharging failed!")
             endTest(window)
@@ -485,6 +481,7 @@ def startTest(config: Config, window: sg.Window):
     else:
         logger.info(f"DCR test complete!")
         window.write_event_value("-TEST-STATUS-", f"Test complete! DCR = {DCR:.3f} Ω")
+        window.write_event_value("-DCR-VALUE-", DCR)
 
     # Done!
     endTest(window)
@@ -542,9 +539,9 @@ def loadConfig() -> Config:
     if not os.path.exists(configPath):
         logger.warning("Config file does not exist, saving defaults...")
         # Write default config
-        saveConfig(defaultConfig)
+        saveConfig(Config())
         # Return default config
-        return defaultConfig
+        return Config()
     else:
         parser = ConfigParser()
         parser.optionxform = str
@@ -567,10 +564,42 @@ def updateConfig(config: Config, values: Any):
     config.dischargeC = float(values["DSG_A"])
     config.dischargeV = float(values["DSG_V"])
     config.dischargeT = int(values["DSG_T"])
+    config.dcrR = float(values["DCR_R"])
+    config.testLeadR = float(values["TEST_R"])
 
 def enableInputs(window: sg.Window, enabled: bool):
-    for key in ["PSU_IP", "PSU_CH", "DCL_IP", "DMM_IP", "CHG_A", "CHG_V", "DSG_A", "DSG_V", "DSG_T"]:
+    for key in ["PSU_IP", "PSU_CH", "DCL_IP", "DMM_IP", "CHG_A", "CHG_V", "DSG_A", "DSG_V", "DSG_T", "DCR_R", "TEST_R"]:
         window[key].update(disabled = not enabled)
+
+def showPassFail(value: float, passed: bool):
+    # Get color and text
+    bgColor = ""
+    statusText = ""
+    if passed:
+        bgColor = "green"
+        statusText = "BATTERY PASS"
+    else:
+        bgColor = "darkred"
+        statusText = "BATTERY FAIL"
+    # Prepare layout
+    passFailLayout = [
+            # Main pass/fail text
+            [ sg.Text(statusText, font = ("Helvetica", 24, "bold"), key = "PASS_FAIL", expand_x=True, justification="center", background_color=bgColor) ],
+            # Measurement value
+            [ sg.Text(f"Battery DCR: {value:.3f} Ω", key = "MEASUREMENT", expand_x=True, justification="center", background_color=bgColor) ],
+            # OK button
+            [ sg.Button("OK", key="BTN_OK") ]
+    ]
+    # Create window
+    passFailWindow = sg.Window(title = "", layout = passFailLayout, modal = True, finalize=True, background_color=bgColor, location=mainWindow.current_location())
+    # Play window ding
+    passFailWindow.ding()
+    # Display the window
+    while True:
+        event, values = passFailWindow.read()
+        if event == sg.WIN_CLOSED or event == "BTN_OK":
+            passFailWindow.close()
+            break
 
 def close():
     """
@@ -595,6 +624,8 @@ def main(window: sg.Window):
     window["DSG_A"].update(config.dischargeC)
     window["DSG_V"].update(config.dischargeV)
     window["DSG_T"].update(config.dischargeT)
+    window["DCR_R"].update(config.dcrR)
+    window["TEST_R"].update(config.testLeadR)
     # Runtime loop
     while True:
         event, values = window.read()
@@ -636,6 +667,16 @@ def main(window: sg.Window):
         elif event == "-DMM-MEAS-":
             pass
 
+        elif event == "-DCR-VALUE-":
+            dcr = float(values["-DCR-VALUE-"])
+            # Determine pass/fail
+            if dcr > config.dcrR:
+                # Show failure screen
+                showPassFail(dcr, False)
+            else:
+                # Show pass screen
+                showPassFail(dcr, True)
+
         # Save Config Command
         elif event == "BTN_SAVECFG":
             saveConfig(config)
@@ -649,4 +690,4 @@ def main(window: sg.Window):
 
 # Startup
 if __name__ == "__main__":
-    main(window)
+    main(mainWindow)

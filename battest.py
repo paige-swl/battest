@@ -35,7 +35,7 @@ class TestType(StrEnum):
 @dataclass
 class Config:
     psuIP: str = "192.168.1.35"
-    psuCh: int = 1
+    psuCh: int = 2
     dclIP: str = "192.168.1.34"
     dmmIP: str = "192.168.1.32"
     chargeC: float = 1.0        # Charge current in amps
@@ -440,8 +440,8 @@ def startTest(config: Config, window: sg.Window):
     time.sleep(2)
     v = dmm.value
     logger.info(f"Starting battery voltage: {v:.3f} V")
-    if (v < config.dischargeV):
-        logger.error(f"Battery starting voltage below discharge threshold! {v:.3f} < {config.dischargeV}")
+    if (v < 3.20):
+        logger.error(f"Battery starting voltage below safety threshold! {v:.3f} < 3.200")
         window.write_event_value("-TEST-STATUS-", "Battery undervoltage!")
         endTest(window)
         return
